@@ -1,0 +1,161 @@
+name: QEMU Native Multi-Platform Static Builds
+
+on:
+  push:
+    paths: [ 'fastscan.c', '.github/workflows/**', 'Makefile' ]
+  pull_request:
+    paths: [ 'fastscan.c', '.github/workflows/**', 'Makefile' ]
+  workflow_dispatch:
+
+env:
+  FASTSCAN_HOMEPAGE: https://github.com/docker-mobile/FastScan
+  FASTSCAN_MAINTAINER: "Docker Mobile Team <maintainers@docker-mobile.com>"
+
+jobs:
+  build-linux:
+    name: Build static Linux binaries (QEMU)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            image: alpine:3.19
+            osarch: linux-x86_64
+          - arch: arm64
+            image: arm64v8/alpine:3.19
+            osarch: linux-arm64
+          - arch: arm
+            image: arm32v7/alpine:3.19
+            osarch: linux-armv7
+          - arch: ppc64le
+            image: ppc64le/alpine:3.19
+            osarch: linux-ppc64le
+          - arch: s390x
+            image: s390x/alpine:3.19
+            osarch: linux-s390x
+          - arch: riscv64
+            image: riscv64/alpine:edge
+            osarch: linux-riscv64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      - name: Get date (YYYYMMDD)
+        id: date
+        run: echo "today=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+
+      - name: Build static binary in QEMU container
+        run: |
+          docker run --rm --platform=linux/${{ matrix.arch }} \
+            -v "$PWD:/src" -w /src ${{ matrix.image }} \
+            sh -c "apk add --no-cache musl-dev gcc make && gcc -O2 -Wall -static -o fastscan fastscan.c"
+
+      - name: Archive binary
+        run: |
+          tar czf ${{ steps.date.outputs.today }}.${{ matrix.osarch }}.tar.gz fastscan
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.date.outputs.today }}.${{ matrix.osarch }}.tar.gz
+          path: ${{ steps.date.outputs.today }}.${{ matrix.osarch }}.tar.gz
+
+  build-windows:
+    name: Build Windows static binaries (dockcross)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            image: dockcross/windows-static-x64
+            osarch: windows-x86_64
+          - arch: x86
+            image: dockcross/windows-static-x86
+            osarch: windows-x86
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get date (YYYYMMDD)
+        id: date
+        run: echo "today=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+
+      - name: Download dockcross script
+        run: |
+          docker run --rm ${{ matrix.image }} > dockcross
+          chmod +x dockcross
+
+      - name: Build static binary in dockcross container
+        run: |
+          ./dockcross bash -c "gcc -O2 -Wall -static -o fastscan.exe fastscan.c"
+
+      - name: Archive binary
+        run: |
+          tar czf ${{ steps.date.outputs.today }}.${{ matrix.osarch }}.tar.gz fastscan.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.date.outputs.today }}.${{ matrix.osarch }}.tar.gz
+          path: ${{ steps.date.outputs.today }}.${{ matrix.osarch }}.tar.gz
+
+  build-macos:
+    name: Build macOS static binaries (native runners only)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: macos-13
+            osarch: macos-x86_64
+          - arch: arm64
+            runner: macos-14
+            osarch: macos-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get date (YYYYMMDD)
+        id: date
+        run: echo "today=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+      - name: Build static binary (best-effort, true static not supported)
+        run: |
+          clang -O2 -Wall -o fastscan fastscan.c
+      - name: Archive binary
+        run: |
+          tar czf ${{ steps.date.outputs.today }}.${{ matrix.osarch }}.tar.gz fastscan
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.date.outputs.today }}.${{ matrix.osarch }}.tar.gz
+          path: ${{ steps.date.outputs.today }}.${{ matrix.osarch }}.tar.gz
+
+  release:
+    name: Release All Artifacts
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-windows, build-macos]
+    permissions:
+      contents: write
+    steps:
+      - name: Get date (YYYYMMDD)
+        id: date
+        run: echo "today=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: List binaries
+        run: ls -lh dist
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.date.outputs.today }}
+          name: ${{ steps.date.outputs.today }}
+          body: |
+            Automated static multi-arch build using QEMU, Docker, and native macOS runners.
+            Homepage: ${{ env.FASTSCAN_HOMEPAGE }}
+          files: dist/**/*.tar.gz
